@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:tx="http://www.springframework.org/schema/tx"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-4.1.xsd
+        http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx-4.1.xsd"
+       default-lazy-init="true">
+
+    <!-- 数据源 -->
+    <bean id="dataSource" class="com.zaxxer.hikari.HikariDataSource" destroy-method="close">
+        <property name="jdbcUrl" value="jdbc:mysql://127.0.0.1:13306/devtester?allowMultiQueries=true"/>
+        <property name="username" value="root"/>
+        <property name="password" value="123456"/>
+        <property name="minimumIdle" value="5"/>
+        <property name="maximumPoolSize" value="12"/>
+        <property name="maxLifetime" value="1200000"/>
+        <property name="autoCommit" value="true"/>
+        <property name="connectionTimeout" value="20000"/>
+    </bean>
+
+    <!-- 事务管理器 -->
+    <bean id="transactionManager" class="org.springframework.jdbc.datasource.DataSourceTransactionManager">
+        <property name="dataSource" ref="dataSource"/>
+    </bean>
+
+    <!-- 开启事务注解 -->
+    <tx:annotation-driven transaction-manager="transactionManager"/>
+
+    <!-- dbVisitor -->
+    <bean id="ormConf" class="net.hasor.dbvisitor.spring.support.ConfigurationBean">
+        <property name="mapperResources" value="classpath*:dbvisitor/mapper/*Mapper.xml"/>
+        <property name="dialectName" value="mysql"/>
+    </bean>
+    <bean id="ormSession" class="net.hasor.dbvisitor.spring.support.SessionBean">
+        <property name="configuration" ref="ormConf"/>
+        <property name="dataSource" ref="dataSource"/>
+    </bean>
+
+    <!-- userMapper -->
+    <bean id="userMapper" class="net.hasor.dbvisitor.spring.support.MapperBean">
+        <property name="session" ref="ormSession"/>
+        <property name="mapperInterface" value="net.hasor.dbvisitor.test.dao.user.UserMapper"/>
+    </bean>
+
+    <!-- roleMapper -->
+    <bean id="roleMapper" class="net.hasor.dbvisitor.spring.support.MapperBean">
+        <property name="session" ref="ormSession"/>
+        <property name="mapperInterface" value="net.hasor.dbvisitor.test.dao.role.RoleMapper"/>
+    </bean>
+</beans>

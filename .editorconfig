@@ -1,0 +1,45 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+indent_size = 4
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+ij_any_line_comment_at_first_column = false
+ij_any_block_comment_at_first_column = false
+
+[*.java]
+ij_java_keep_simple_blocks_in_one_line = true
+ij_java_keep_simple_methods_in_one_line = true
+ij_java_keep_simple_lambdas_in_one_line = true
+ij_java_keep_simple_classes_in_one_line = true
+ij_java_keep_blank_lines_in_declarations = 1
+ij_java_keep_blank_lines_in_code = 1
+ij_java_keep_blank_lines_before_right_brace = 1
+ij_java_keep_blank_lines_between_package_declaration_and_header = 1
+ij_java_blank_lines_before_package = 0
+ij_java_blank_lines_after_package = 1
+ij_java_blank_lines_before_imports = 0
+ij_java_blank_lines_after_imports = 1
+ij_java_blank_lines_around_class = 1
+ij_java_blank_lines_after_class_header = 0
+ij_java_blank_lines_before_class_end = 1
+ij_java_blank_lines_after_anonymous_class_header = 0
+ij_java_blank_lines_around_field_in_interface = 1
+ij_java_blank_lines_around_field = 0
+ij_java_blank_lines_around_method_in_interface = 1
+ij_java_blank_lines_around_method = 0
+ij_java_blank_lines_before_method_body = 0
+ij_java_blank_lines_around_initializer = 0
+ij_java_class_annotation_wrap = unset
+ij_java_field_annotation_wrap = off
+ij_java_enum_field_annotation_wrap = unset
+ij_java_method_annotation_wrap = unset
+ij_java_parameter_annotation_wrap = unset
+ij_java_variable_annotation_wrap = unset
+ij_java_imports_layout = io.ooknight.**, |, *, |, jakarta.**, javax.**, java.**, |, $*
+
+[*.md]
+trim_trailing_whitespace = false

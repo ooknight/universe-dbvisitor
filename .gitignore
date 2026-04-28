@@ -1,0 +1,43 @@
+.cache
+test-work
+bin
+/out/
+.DS_Store
+_book
+dependency-reduced-pom.xml
+.gradle
+/.gradle/
+
+# nodejs
+package-lock.json
+node_modules
+dist
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor directories and files
+.settings
+target
+.classpath
+.project
+*.iml
+*/*.iml
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+pom.xml.versionsBackup
+pom.xml.releaseBackup
+release.properties
+
+# codes
+gen/
+logs/*
+
+# docs
+.docusaurus
+.cache-loader
+dbvisitor-doc/build/

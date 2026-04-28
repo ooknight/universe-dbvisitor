@@ -1,0 +1,496 @@
+/*
+ * Copyright 2015-2022 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.hasor.dbvisitor.lambda.core;
+import java.sql.SQLException;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
+
+import net.hasor.cobble.StringUtils;
+import net.hasor.dbvisitor.dialect.BoundSql;
+import net.hasor.dbvisitor.dialect.features.PageSqlDialect;
+import net.hasor.dbvisitor.dynamic.QueryContext;
+import net.hasor.dbvisitor.jdbc.ResultSetExtractor;
+import net.hasor.dbvisitor.jdbc.RowCallbackHandler;
+import net.hasor.dbvisitor.jdbc.RowMapper;
+import net.hasor.dbvisitor.jdbc.core.JdbcTemplate;
+import net.hasor.dbvisitor.jdbc.extractor.BeanMappingResultSetExtractor;
+import net.hasor.dbvisitor.jdbc.extractor.MapMappingResultSetExtractor;
+import net.hasor.dbvisitor.jdbc.extractor.PairsResultSetExtractor;
+import net.hasor.dbvisitor.jdbc.mapper.BeanMappingRowMapper;
+import net.hasor.dbvisitor.jdbc.mapper.ColumnMapRowMapper;
+import net.hasor.dbvisitor.jdbc.mapper.MapMappingRowMapper;
+import net.hasor.dbvisitor.mapping.MappingRegistry;
+import net.hasor.dbvisitor.mapping.def.ColumnMapping;
+import net.hasor.dbvisitor.mapping.def.TableMapping;
+import net.hasor.dbvisitor.page.Page;
+
+/**
+ * 提供 lambda query 基础能力。
+ * @author 赵永春 (zyc@hasor.net)
+ * @version 2020-10-27
+ */
+public abstract class AbstractSelect<R, T, P> extends BasicQueryCompare<R, T, P> implements QueryFunc<R, T, P> {
+    private final Page pageInfo = new PageObjectForFetchCount(0, this::queryForLargeCount);
+
+    public AbstractSelect(Class<?> exampleType, TableMapping<?> tableMapping, MappingRegistry registry, JdbcTemplate jdbc, QueryContext ctx) {
+        super(exampleType, tableMapping, registry, jdbc, ctx);
+    }
+
+    @Override
+    public R reset() {
+        super.reset();
+        this.initPage(-1, 0);
+        return this.getSelf();
+    }
+
+    @Override
+    public R selectAll() {
+        this.cmdBuilder.clearSelect();
+        this.cmdBuilder.addSelectAll();
+        return this.getSelf();
+    }
+
+    @SafeVarargs
+    @Override
+    public final R selectAdd(P first, P... other) {
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            List<String> list = new ArrayList<>();
+            list.add(getPropertyName(first));
+            Arrays.stream(other).map(this::getPropertyName).forEach(list::add);
+            return this.selectApply(list, false);
+        } else if (first == null) {
+            List<String> list = new ArrayList<>();
+            Arrays.stream(other).map(this::getPropertyName).forEach(list::add);
+            return this.selectApply(list, false);
+        } else {
+            return this.selectApply(Collections.singletonList(getPropertyName(first)), false);
+        }
+    }
+
+    @SafeVarargs
+    @Override
+    public final R select(P first, P... other) {
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            List<String> list = new ArrayList<>();
+            list.add(getPropertyName(first));
+            Arrays.stream(other).map(this::getPropertyName).forEach(list::add);
+            return this.selectApply(list, true);
+        } else if (first == null) {
+            List<String> list = new ArrayList<>();
+            Arrays.stream(other).map(this::getPropertyName).forEach(list::add);
+            return this.selectApply(list, true);
+        } else {
+            return this.selectApply(Collections.singletonList(getPropertyName(first)), true);
+        }
+    }
+
+    protected R selectApply(List<String> properties, boolean cleanSelect) {
+        if (properties == null || properties.isEmpty()) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        }
+
+        if (cleanSelect) {
+            this.cmdBuilder.clearSelect();
+        }
+
+        for (String property : properties) {
+            String colName;
+            String colTerm;
+            if (isFreedom()) {
+                colName = this.getTableMapping().isToCamelCase() ? StringUtils.humpToLine(property) : property;
+                colTerm = null;
+            } else {
+                ColumnMapping mapping = this.findPropertyByName(property);
+                colName = mapping != null ? mapping.getColumn() : property;
+                colTerm = mapping != null ? mapping.getSelectTemplate() : null;
+            }
+
+            this.cmdBuilder.addSelect(colName, colTerm);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public R applySelect(String select) {
+        this.cmdBuilder.clearSelect();
+        this.cmdBuilder.addSelectCustom(select, null);
+        return this.getSelf();
+    }
+
+    @Override
+    public R applySelectAdd(String select) {
+        this.cmdBuilder.addSelectCustom(select, null);
+        return this.getSelf();
+    }
+
+    @SafeVarargs
+    @Override
+    public final R groupBy(P first, P... other) {
+        List<P> groupBy;
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            groupBy = new ArrayList<>();
+            groupBy.add(first);
+            groupBy.addAll(Arrays.asList(other));
+        } else if (first == null) {
+            groupBy = Arrays.asList(other);
+        } else {
+            groupBy = Collections.singletonList(first);
+        }
+
+        //
+        if (!groupBy.isEmpty()) {
+            for (P property : groupBy) {
+                String propertyName = getPropertyName(property);
+                String colName;
+                String colTerm;
+                if (isFreedom()) {
+                    colName = this.getTableMapping().isToCamelCase() ? StringUtils.humpToLine(propertyName) : propertyName;
+                    colTerm = null;
+                } else {
+                    ColumnMapping mapping = this.findPropertyByName(propertyName);
+                    if (mapping == null) {
+                        colName = this.getTableMapping().isToCamelCase() ? StringUtils.humpToLine(propertyName) : propertyName;
+                        colTerm = null;
+                    } else {
+                        colName = mapping.getColumn();
+                        colTerm = mapping.getSelectTemplate();
+                    }
+                }
+
+                this.cmdBuilder.addGroupBy(colName, colTerm);
+            }
+        }
+        return this.getSelf();
+    }
+
+    protected R addOrderByVector(P property, Object vector, MetricType metricType) {
+        String propName = getPropertyName(property);
+        String colName;
+        String colTerm;
+        if (isFreedom()) {
+            colName = this.getTableMapping().isToCamelCase() ? StringUtils.humpToLine(propName) : propName;
+            colTerm = null;
+        } else {
+            ColumnMapping mapping = this.findPropertyByName(propName);
+            colName = mapping != null ? mapping.getColumn() : propName;
+            colTerm = mapping != null ? mapping.getOrderByColTemplate() : null;
+        }
+        this.cmdBuilder.addVectorByOrder(colName, colTerm, vector, null, metricType);
+        return this.getSelf();
+    }
+
+    @Override
+    public R orderByMetric(MetricType metricType, P property, Object vector) {
+        return addOrderByVector(property, vector, metricType);
+    }
+
+    protected R addOrderBy(OrderType orderType, List<String> orderBy, OrderNullsStrategy strategy) {
+        if (orderBy != null && !orderBy.isEmpty()) {
+            for (String property : orderBy) {
+                String colName;
+                String colTerm;
+                if (isFreedom()) {
+                    colName = this.getTableMapping().isToCamelCase() ? StringUtils.humpToLine(property) : property;
+                    colTerm = null;
+                } else {
+                    ColumnMapping mapping = this.findPropertyByName(property);
+                    colName = mapping != null ? mapping.getColumn() : property;
+                    colTerm = mapping != null ? mapping.getOrderByColTemplate() : null;
+                }
+
+                this.cmdBuilder.addOrderBy(colName, colTerm, orderType, strategy);
+            }
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public R usePage(Page pageInfo) {
+        Page page = this.pageInfo();
+        page.setPageSize(pageInfo.getPageSize());
+        page.setTotalCount(pageInfo.getTotalCount());
+        page.setPageNumberOffset(pageInfo.getPageNumberOffset());
+        page.setCurrentPage(pageInfo.getCurrentPage());
+        return this.getSelf();
+    }
+
+    @Override
+    public Page pageInfo() {
+        return this.pageInfo;
+    }
+
+    @Override
+    public R initPage(int pageSize, int pageNumber) {
+        Page pageInfo = pageInfo();
+        pageInfo.setPageNumberOffset(0);
+        pageInfo.setPageSize(pageSize);
+        pageInfo.setCurrentPage(pageNumber);
+        return this.getSelf();
+    }
+
+    @Override
+    public void query(RowCallbackHandler rch) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        this.jdbc.query(boundSql.getSqlString(), boundSql.getArgs(), rch);
+    }
+
+    @Override
+    public <V> V query(ResultSetExtractor<V> rse) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        return this.jdbc.query(boundSql.getSqlString(), boundSql.getArgs(), rse);
+    }
+
+    @Override
+    public List<T> queryForList() {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+        BoundSql boundSql = getBoundSql();
+
+        if (Map.class == this.exampleType() || isFreedom()) {
+            return (List<T>) this.queryForMapList();
+        } else {
+            ResultSetExtractor<List<T>> extractor = new BeanMappingResultSetExtractor<>(this.getTableMapping());
+            return this.jdbc.query(boundSql.getSqlString(), boundSql.getArgs(), extractor);
+        }
+    }
+
+    @Override
+    public <V> List<V> queryForList(Class<V> asType) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        return this.jdbc.queryForList(boundSql.getSqlString(), boundSql.getArgs(), asType);
+    }
+
+    @Override
+    public <V> List<V> queryForList(RowMapper<V> rowMapper) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        return this.jdbc.queryForList(boundSql.getSqlString(), boundSql.getArgs(), rowMapper);
+    }
+
+    @Override
+    public List<Map<String, Object>> queryForMapList() {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        ResultSetExtractor<List<Map<String, Object>>> extractor = new MapMappingResultSetExtractor(this.getTableMapping());
+        return this.jdbc.query(boundSql.getSqlString(), boundSql.getArgs(), extractor);
+    }
+
+    @Override
+    public Map<String, Object> queryForMap() {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        RowMapper<Map<String, Object>> rowMapper = new MapMappingRowMapper(getTableMapping());
+        return this.jdbc.queryForObject(boundSql.getSqlString(), boundSql.getArgs(), rowMapper);
+    }
+
+    @Override
+    public <K, V> Map<K, V> queryForPairs(P keyProperty, P valueProperty, Class<K> keyType, Class<V> valueType) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+        Objects.requireNonNull(keyProperty, "keyProperty is required.");
+        Objects.requireNonNull(valueProperty, "valueProperty is required.");
+        Objects.requireNonNull(keyType, "keyType is required.");
+        Objects.requireNonNull(valueType, "valueType is required.");
+
+        String keyPropName = getPropertyName(keyProperty);
+        String valuePropName = getPropertyName(valueProperty);
+        return queryForPairsByName(keyPropName, valuePropName, keyType, valueType);
+    }
+
+    @Override
+    public <K, V> Map<K, V> queryForPairsByName(String keyPropName, String valuePropName, Class<K> keyType, Class<V> valueType) {
+        List<String> selectProps = new ArrayList<>(2);
+        selectProps.add(keyPropName);
+        selectProps.add(valuePropName);
+        this.selectApply(selectProps, true);
+
+        BoundSql boundSql = getBoundSql();
+        PairsResultSetExtractor<K, V> extractor = new PairsResultSetExtractor<>(this.registry.getTypeRegistry(), keyType, valueType);
+        return this.jdbc.query(boundSql.getSqlString(), boundSql.getArgs(), extractor);
+    }
+
+    @Override
+    public T queryForObject() {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        RowMapper<T> rowMapper;
+        if (Map.class.isAssignableFrom(this.getTableMapping().entityType())) {
+            boolean caseInsensitive = this.getTableMapping().isCaseInsensitive();
+            rowMapper = (RowMapper<T>) new ColumnMapRowMapper(caseInsensitive, this.registry.getTypeRegistry());
+        } else {
+            rowMapper = new BeanMappingRowMapper<>(getTableMapping());
+        }
+
+        BoundSql boundSql = getBoundSql();
+        return this.jdbc.queryForObject(boundSql.getSqlString(), boundSql.getArgs(), rowMapper);
+    }
+
+    @Override
+    public <V> V queryForObject(Class<V> asType) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql boundSql = getBoundSql();
+        return this.jdbc.queryForObject(boundSql.getSqlString(), boundSql.getArgs(), asType);
+    }
+
+    @Override
+    public <V> V queryForObject(RowMapper<V> rowMapper) {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+        Objects.requireNonNull(rowMapper, "rowMapper is required.");
+
+        BoundSql boundSql = getBoundSql();
+        return this.jdbc.queryForObject(boundSql.getSqlString(), boundSql.getArgs(), rowMapper);
+    }
+
+    @Override
+    public int queryForCount() {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql oriBoundSql = this.buildBoundSqlWithoutPage();
+        BoundSql countSql = ((PageSqlDialect) this.dialect()).countSql(oriBoundSql);
+        return this.jdbc.queryForInt(countSql.getSqlString(), countSql.getArgs());
+    }
+
+    @Override
+    public long queryForLargeCount() {
+        Objects.requireNonNull(this.jdbc, "Connection unavailable, JdbcTemplate is required.");
+
+        BoundSql oriBoundSql = this.buildBoundSqlWithoutPage();
+        BoundSql countSql = ((PageSqlDialect) this.dialect()).countSql(oriBoundSql);
+        return this.jdbc.queryForLong(countSql.getSqlString(), countSql.getArgs());
+    }
+
+    @Override
+    public BoundSql getBoundSql() {
+        long pageSize = pageInfo().getPageSize();
+        if (pageSize > 0) {
+            BoundSql sqlWithoutPage = buildBoundSqlWithoutPage();
+            long position = pageInfo().getFirstRecordPosition();
+            return ((PageSqlDialect) dialect()).pageSql(sqlWithoutPage, position, pageSize);
+        } else {
+            return buildBoundSqlWithoutPage();
+        }
+    }
+
+    private BoundSql buildBoundSqlWithoutPage() {
+        if (!this.cmdBuilder.hasSelect() && this.getTableMapping().hashSelectTemplate() && !this.isFreedom()) {
+            this.getTableMapping().getProperties().forEach(cm -> {
+                String colName = cm.getColumn();
+                String colTerm = cm.getSelectTemplate();
+                this.cmdBuilder.addSelect(colName, colTerm);
+            });
+        }
+        return this.cmdBuilder.buildSelect(isQualifier());
+    }
+
+    @Override
+    public <D> Iterator<D> iteratorForLimit(long limit, int batchSize, Function<T, D> transform) {
+        Page pageInfo = new PageObjectForFetchCount(batchSize, this::queryForLargeCount);
+        pageInfo.setCurrentPage(0);
+        pageInfo.setPageNumberOffset(0);
+        return new StreamIterator<>(limit, pageInfo, this, transform, null);
+    }
+
+    @Override
+    public <D> Iterator<D> iteratorByBatch(int batchSize, Function<T, D> transform) {
+        Page pageInfo = new PageObjectForFetchCount(batchSize, this::queryForLargeCount);
+        pageInfo.setCurrentPage(0);
+        pageInfo.setPageNumberOffset(0);
+        return new StreamIterator<>(-1, pageInfo, this, transform, null);
+    }
+
+    private static class StreamIterator<R, T, P, D> implements Iterator<D> {
+        private final Page                    pageInfo;
+        private final AbstractSelect<R, T, P> wrapper;
+        private final RowMapper<T>            rowMapper;
+        //
+        private       Iterator<T>             currentIterator;
+        private final Function<T, D>          transform;
+        private final AtomicLong              limitCounter;
+        private       boolean                 eof = false;
+
+        public StreamIterator(long limit, Page pageInfo, AbstractSelect<R, T, P> wrapper, Function<T, D> transform, RowMapper<T> rowMapper) {
+            this.limitCounter = limit < 0 ? null : new AtomicLong(limit);
+            this.pageInfo = pageInfo;
+            this.wrapper = wrapper;
+            this.transform = transform;
+            this.rowMapper = rowMapper;
+        }
+
+        private synchronized void fetchData() {
+            this.wrapper.usePage(this.pageInfo);
+            List<T> queryResult;
+            if (this.rowMapper == null) {
+                queryResult = this.wrapper.queryForList();
+            } else {
+                queryResult = this.wrapper.queryForList(this.rowMapper);
+            }
+            if (queryResult == null || queryResult.isEmpty()) {
+                this.eof = true;
+                this.currentIterator = Collections.emptyIterator();
+            } else {
+                this.currentIterator = queryResult.iterator();
+            }
+        }
+
+        @Override
+        public synchronized boolean hasNext() {
+            if (this.limitCounter != null && this.limitCounter.get() <= 0) {
+                return false;
+            }
+
+            if (this.currentIterator == null) {
+                this.fetchData();
+            }
+
+            if (this.currentIterator.hasNext()) {
+                return true;
+            } else if (!this.eof) {
+                this.pageInfo.nextPage();
+                this.fetchData();
+                return this.currentIterator.hasNext();
+            } else {
+                return false;
+            }
+        }
+
+        @Override
+        public synchronized D next() {
+            if (this.hasNext()) {
+                if (this.limitCounter != null) {
+                    this.limitCounter.decrementAndGet();
+                }
+                return this.transform.apply(this.currentIterator.next());
+            } else {
+                throw new NoSuchElementException();
+            }
+        }
+    }
+}

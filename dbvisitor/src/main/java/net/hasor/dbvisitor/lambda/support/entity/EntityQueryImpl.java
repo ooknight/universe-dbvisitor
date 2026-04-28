@@ -1,0 +1,351 @@
+/*
+ * Copyright 2015-2022 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package net.hasor.dbvisitor.lambda.support.entity;
+import java.sql.SQLException;
+import java.util.*;
+import net.hasor.cobble.BeanUtils;
+import net.hasor.cobble.ObjectUtils;
+import net.hasor.cobble.StringUtils;
+import net.hasor.cobble.reflect.SFunction;
+import net.hasor.dbvisitor.dialect.SqlCommandBuilder.ConditionType;
+import net.hasor.dbvisitor.dialect.SqlDialect.SqlLike;
+import net.hasor.dbvisitor.dynamic.QueryContext;
+import net.hasor.dbvisitor.jdbc.core.JdbcTemplate;
+import net.hasor.dbvisitor.lambda.EntityQuery;
+import net.hasor.dbvisitor.lambda.MapQuery;
+import net.hasor.dbvisitor.lambda.core.AbstractSelect;
+import net.hasor.dbvisitor.lambda.core.OrderNullsStrategy;
+import net.hasor.dbvisitor.lambda.core.OrderType;
+import net.hasor.dbvisitor.lambda.support.map.MapQueryImpl;
+import net.hasor.dbvisitor.mapping.MappingRegistry;
+import net.hasor.dbvisitor.mapping.def.ColumnMapping;
+import net.hasor.dbvisitor.mapping.def.TableMapping;
+
+/**
+ * 提供 lambda query 能力。是 EntityQuery 接口的实现类。
+ * @author 赵永春 (zyc@hasor.net)
+ * @version 2022-04-02
+ */
+public class EntityQueryImpl<T> extends AbstractSelect<EntityQuery<T>, T, SFunction<T>> implements EntityQuery<T> {
+    public EntityQueryImpl(TableMapping<T> tableMapping, MappingRegistry registry, JdbcTemplate jdbc, QueryContext ctx) {
+        super(tableMapping.entityType(), tableMapping, registry, jdbc, ctx);
+    }
+
+    @Override
+    public MapQuery asMap() {
+        return new MapQueryImpl(this.getTableMapping(), this.registry, this.jdbc, this.queryContext);
+    }
+
+    @Override
+    protected EntityQuery<T> getSelf() {
+        return this;
+    }
+
+    @Override
+    protected String getPropertyName(SFunction<T> property) {
+        return BeanUtils.toProperty(property);
+    }
+
+    @SafeVarargs
+    @Override
+    public final EntityQuery<T> groupBy(String first, String... other) {
+        List<String> groupBy;
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            groupBy = new ArrayList<>();
+            groupBy.add(first);
+            groupBy.addAll(Arrays.asList(other));
+        } else if (first == null) {
+            groupBy = Arrays.asList(other);
+        } else {
+            groupBy = Collections.singletonList(first);
+        }
+
+        if (!groupBy.isEmpty()) {
+            for (String property : groupBy) {
+                String colName;
+                String colTerm;
+                ColumnMapping mapping = this.findPropertyByName(property);
+                if (mapping == null) {
+                    colName = this.getTableMapping().isToCamelCase() ? StringUtils.humpToLine(property) : property;
+                    colTerm = null;
+                } else {
+                    colName = mapping.getColumn();
+                    colTerm = mapping.getSelectTemplate();
+                }
+
+                this.cmdBuilder.addGroupBy(colName, colTerm);
+            }
+        }
+        return this.getSelf();
+    }
+
+    @SafeVarargs
+    @Override
+    public final EntityQuery<T> orderBy(OrderType orderType, OrderNullsStrategy strategy, SFunction<T> first, SFunction<T>... other) {
+        List<String> orderBy;
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            orderBy = new ArrayList<>();
+            orderBy.add(getPropertyName(first));
+            Arrays.stream(other).map(this::getPropertyName).forEach(orderBy::add);
+        } else if (first == null) {
+            orderBy = new ArrayList<>();
+            Arrays.stream(other).map(this::getPropertyName).forEach(orderBy::add);
+        } else {
+            orderBy = Collections.singletonList(getPropertyName(first));
+        }
+
+        switch (orderType) {
+            case ASC:
+                return this.addOrderBy(OrderType.ASC, orderBy, strategy);
+            case DESC:
+                return this.addOrderBy(OrderType.DESC, orderBy, strategy);
+            case DEFAULT:
+                return this.addOrderBy(OrderType.DEFAULT, orderBy, strategy);
+            default:
+                throw new UnsupportedOperationException("orderType " + orderType + " Unsupported.");
+        }
+    }
+
+    @Override
+    public EntityQuery<T> orderBy(OrderType orderType, OrderNullsStrategy strategy, String first, String... other) {
+        List<String> orderBy;
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            orderBy = new ArrayList<>();
+            orderBy.add(first);
+            orderBy.addAll(Arrays.asList(other));
+        } else if (first == null) {
+            orderBy = Arrays.asList(other);
+        } else {
+            orderBy = Collections.singletonList(first);
+        }
+
+        switch (orderType) {
+            case ASC:
+                return this.addOrderBy(OrderType.ASC, orderBy, strategy);
+            case DESC:
+                return this.addOrderBy(OrderType.DESC, orderBy, strategy);
+            case DEFAULT:
+                return this.addOrderBy(OrderType.DEFAULT, orderBy, strategy);
+            default:
+                throw new UnsupportedOperationException("orderType " + orderType + " Unsupported.");
+        }
+    }
+
+    // ----------------------------------------------------
+
+    @Override
+    public EntityQuery<T> eq(boolean test, String property, Object value) {
+        if (test) {
+            if (value == null) {
+                this.addCondition(property, ConditionType.IS_NULL, null);
+            } else {
+                this.addCondition(property, ConditionType.EQ, value);
+            }
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> ne(boolean test, String property, Object value) {
+        if (test) {
+            if (value == null) {
+                this.addCondition(property, ConditionType.IS_NOT_NULL, null);
+            } else {
+                this.addCondition(property, ConditionType.NE, value);
+            }
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> gt(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.GT, value);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> ge(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.GE, value);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> lt(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.LT, value);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> le(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.LE, value);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> like(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.LIKE, value, SqlLike.DEFAULT);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> notLike(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.NOT_LIKE, value, SqlLike.DEFAULT);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> likeRight(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.LIKE, value, SqlLike.RIGHT);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> notLikeRight(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.NOT_LIKE, value, SqlLike.RIGHT);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> likeLeft(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.LIKE, value, SqlLike.LEFT);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> notLikeLeft(boolean test, String property, Object value) {
+        if (test) {
+            this.addCondition(property, ConditionType.NOT_LIKE, value, SqlLike.LEFT);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> isNull(boolean test, String property) {
+        if (test) {
+            this.addCondition(property, ConditionType.IS_NULL, null);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> isNotNull(boolean test, String property) {
+        if (test) {
+            this.addCondition(property, ConditionType.IS_NOT_NULL, null);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> in(boolean test, String property, Collection<?> value) {
+        if (test) {
+            ObjectUtils.assertTrue(!value.isEmpty(), "build in failed, value is empty.");
+            this.addConditionForIn(property, ConditionType.IN, value);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> notIn(boolean test, String property, Collection<?> value) {
+        if (test) {
+            ObjectUtils.assertTrue(!value.isEmpty(), "build notIn failed, value is empty.");
+            this.addConditionForIn(property, ConditionType.NOT_IN, value);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> between(boolean test, String property, Object value1, Object value2) {
+        if (test) {
+            this.addConditionForBetween(property, ConditionType.BETWEEN, value1, value2);
+        }
+        return this.getSelf();
+    }
+
+    @Override
+    public EntityQuery<T> notBetween(boolean test, String property, Object value1, Object value2) {
+        if (test) {
+            this.addConditionForBetween(property, ConditionType.NOT_BETWEEN, value1, value2);
+        }
+        return this.getSelf();
+    }
+
+    @SafeVarargs
+    @Override
+    public final EntityQuery<T> selectAdd(String first, String... other) {
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            List<String> list = new ArrayList<>();
+            list.add(first);
+            list.addAll(Arrays.asList(other));
+            return this.selectApply(list, false);
+        } else if (first == null) {
+            return this.selectApply(Arrays.asList(other), false);
+        } else {
+            return this.selectApply(Collections.singletonList(first), false);
+        }
+    }
+
+    @SafeVarargs
+    @Override
+    public final EntityQuery<T> select(String first, String... other) {
+        if (first == null && other == null) {
+            throw new IndexOutOfBoundsException("properties is empty.");
+        } else if (first != null && other != null) {
+            List<String> list = new ArrayList<>();
+            list.add(first);
+            list.addAll(Arrays.asList(other));
+            return this.selectApply(list, true);
+        } else if (first == null) {
+            return this.selectApply(Arrays.asList(other), true);
+        } else {
+            return this.selectApply(Collections.singletonList(first), true);
+        }
+    }
+
+    @Override
+    public <K, V> Map<K, V> queryForPairs(String keyProperty, String valueProperty, Class<K> keyType, Class<V> valueType) throws SQLException {
+        Objects.requireNonNull(keyProperty, "keyProperty is required.");
+        Objects.requireNonNull(valueProperty, "valueProperty is required.");
+        Objects.requireNonNull(keyType, "keyType is required.");
+        Objects.requireNonNull(valueType, "valueType is required.");
+        return queryForPairsByName(keyProperty, valueProperty, keyType, valueType);
+    }
+}
