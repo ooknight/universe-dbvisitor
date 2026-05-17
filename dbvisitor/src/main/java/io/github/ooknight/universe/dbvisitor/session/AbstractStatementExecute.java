@@ -1,0 +1,306 @@
+/*
+ * Copyright 2015-2022 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.ooknight.universe.dbvisitor.session;
+import java.sql.*;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import net.hasor.cobble.ArrayUtils;
+import net.hasor.cobble.ExceptionUtils;
+import net.hasor.cobble.StringUtils;
+import net.hasor.cobble.logging.Logger;
+import net.hasor.cobble.logging.LoggerFactory;
+import net.hasor.cobble.reflect.resolvable.ResolvableType;
+import io.github.ooknight.universe.dbvisitor.dialect.BoundSql;
+import io.github.ooknight.universe.dbvisitor.dialect.SqlDialectRegister;
+import io.github.ooknight.universe.dbvisitor.dialect.features.PageSqlDialect;
+import io.github.ooknight.universe.dbvisitor.dynamic.SqlBuilder;
+import io.github.ooknight.universe.dbvisitor.jdbc.extractor.BeanMappingResultSetExtractor;
+import io.github.ooknight.universe.dbvisitor.jdbc.extractor.ColumnMapResultSetExtractor;
+import io.github.ooknight.universe.dbvisitor.jdbc.extractor.RowCallbackHandlerResultSetExtractor;
+import io.github.ooknight.universe.dbvisitor.jdbc.extractor.RowMapperResultSetExtractor;
+import io.github.ooknight.universe.dbvisitor.jdbc.mapper.TypeHandlerColumnRowMapper;
+import io.github.ooknight.universe.dbvisitor.mapper.StatementDef;
+import io.github.ooknight.universe.dbvisitor.mapper.def.DmlConfig;
+import io.github.ooknight.universe.dbvisitor.mapper.def.DqlConfig;
+import io.github.ooknight.universe.dbvisitor.mapper.def.ExecuteConfig;
+import io.github.ooknight.universe.dbvisitor.mapper.def.InsertConfig;
+import io.github.ooknight.universe.dbvisitor.mapper.def.SqlConfig;
+import io.github.ooknight.universe.dbvisitor.mapping.MappingHelper;
+import io.github.ooknight.universe.dbvisitor.page.Page;
+import io.github.ooknight.universe.dbvisitor.page.PageResult;
+import io.github.ooknight.universe.dbvisitor.types.TypeHandler;
+import io.github.ooknight.universe.dbvisitor.types.TypeHandlerRegistry;
+
+/**
+ * 执行器基类
+ * @author 赵永春 (zyc@hasor.net)
+ * @version 2021-07-20
+ */
+public abstract class AbstractStatementExecute {
+    protected static final Logger        logger = LoggerFactory.getLogger(AbstractStatementExecute.class);
+    protected final        Configuration registry;
+
+    public AbstractStatementExecute(Configuration registry) {
+        this.registry = registry;
+    }
+
+    protected void doCheck(Connection conn, SqlConfig config, Map<String, Object> data, Page pageInfo) throws SQLException {
+        boolean hasOutBind;
+        if (config instanceof ExecuteConfig) {
+            hasOutBind = ((ExecuteConfig) config).getBindOut().length > 0;
+        } else if (config instanceof DqlConfig) {
+            hasOutBind = ((DqlConfig) config).getBindOut().length > 0;
+        } else {
+            hasOutBind = false;
+        }
+
+        if (hasOutBind && SessionHelper.usingPage(pageInfo)) {
+            throw new SQLException("cannot use paging queries when using bindOut.");
+        }
+    }
+
+    public final Object execute(Connection conn, StatementDef def, Map<String, Object> data) throws SQLException {
+        return this.execute(conn, def, data, null, false);
+    }
+
+    public final Object execute(Connection conn, StatementDef def, Map<String, Object> data, Page pageInfo, boolean pageResult) throws SQLException {
+        SqlConfig config = def.getConfig();
+        this.doCheck(conn, config, data, pageInfo);
+
+        // prepare sql
+        MergedMap<String, Object> dataCtx = null;
+        if (data instanceof MergedMap) {
+            dataCtx = (MergedMap<String, Object>) data;
+        } else {
+            dataCtx = new MergedMap<>();
+            dataCtx.appendMap(data, true);
+        }
+
+        SqlBuilder oriSql = config.buildQuery(dataCtx, this.registry);
+        BoundSql execSql = oriSql;
+        BoundSql countSql = null;
+
+        // prepare page
+        long resultCount = 0L;
+        if (SessionHelper.usingPage(pageInfo)) {
+            PageSqlDialect dialect = (PageSqlDialect) SqlDialectRegister.findDialect(this.registry.options(), conn);
+            long position = pageInfo.getFirstRecordPosition();
+            long pageSize = pageInfo.getPageSize();
+            execSql = dialect.pageSql(oriSql, position, pageSize);
+
+            if (pageInfo.isRefreshTotalCount() || pageInfo.getTotalCount() <= 0) {
+                countSql = dialect.countSql(oriSql);
+            }
+
+            resultCount = pageInfo.getTotalCount(); // old value
+        }
+
+        // query count
+        if (countSql != null && pageResult) {
+            try (PreparedStatement stat = conn.prepareStatement(countSql.getSqlString())) {
+                if (logger.isTraceEnabled()) {
+                    logger.trace(SessionHelper.fmtBoundSql(countSql).toString());
+                }
+                this.configStatement(stat, config);
+                resultCount = this.executeCount(stat, countSql.getArgs());
+            } catch (SQLException e) {
+                logger.error("executeCount failed, " + ExceptionUtils.getRootCauseMessage(e) + ", " + SessionHelper.fmtBoundSql(countSql), e);
+                throw e;
+            }
+        }
+
+        // query data
+        try (Statement stat = this.createStatement(conn, config, execSql)) {
+            if (logger.isTraceEnabled()) {
+                logger.trace(SessionHelper.fmtBoundSql(execSql).toString());
+            }
+
+            this.configStatement(stat, config);
+
+            boolean retVal = this.executeQuery(stat, config, execSql);
+            Object result = this.fetchResult(retVal, stat, def, oriSql, dataCtx, pageInfo, resultCount, pageResult);
+
+            // useGeneratedKeys：将生成的键值从 MergedMap 回写到原始参数 Map（MergedMap 不污染源，需显式拷贝）
+            if (!(data instanceof MergedMap) && data != null && def.getConfig() instanceof InsertConfig) {
+                InsertConfig ic = (InsertConfig) def.getConfig();
+                if (ic.isUseGeneratedKeys() && ic.getKeyProperty() != null && !ic.getKeyProperty().isEmpty()) {
+                    for (String prop : ic.getKeyProperty().split(",")) {
+                        String key = prop.trim();
+                        if (dataCtx.containsKey(key)) {
+                            data.put(key, dataCtx.get(key));
+                        }
+                    }
+                }
+            }
+
+            return result;
+        } catch (SQLException e) {
+            logger.error("executeQuery failed, " + ExceptionUtils.getRootCauseMessage(e) + ", " + SessionHelper.fmtBoundSql(countSql), e);
+            throw e;
+        }
+    }
+
+    protected abstract Statement createStatement(Connection conn, SqlConfig config, BoundSql execSql) throws SQLException;
+
+    protected void configStatement(Statement stat, SqlConfig config) throws SQLException {
+        if (config.getTimeout() > 0) {
+            stat.setQueryTimeout(config.getTimeout());
+        }
+        if (config instanceof DqlConfig && ((DqlConfig) config).getFetchSize() > 0) {
+            stat.setFetchSize(((DqlConfig) config).getFetchSize());
+        }
+    }
+
+    private long executeCount(PreparedStatement cntStat, Object[] args) throws SQLException {
+        for (int j = 0; j < args.length; j++) {
+            TypeHandlerRegistry.DEFAULT.setParameterValue(cntStat, j + 1, args[j]);
+        }
+
+        try (ResultSet resultSet = cntStat.executeQuery()) {
+            if (resultSet.next()) {
+                return resultSet.getLong(1);
+            } else {
+                return -1;
+            }
+        }
+    }
+
+    protected abstract boolean executeQuery(Statement stat, SqlConfig config, BoundSql execSql) throws SQLException;
+
+    protected Object fetchResult(boolean retVal, Statement stat, StatementDef def, SqlBuilder oriSql, Map<String, Object> ctx, Page oriPageInfo, long newPageCnt, boolean pageResult) throws SQLException {
+        String[] bindOut = null;
+        boolean usingMultipleResultFetch = false;
+
+        if (def.getConfig() instanceof DqlConfig) {
+            bindOut = ((DqlConfig) def.getConfig()).getBindOut();
+            usingMultipleResultFetch = bindOut.length > 0;
+        } else if (def.getConfig() instanceof ExecuteConfig) {
+            bindOut = ((ExecuteConfig) def.getConfig()).getBindOut();
+            usingMultipleResultFetch = bindOut.length > 0;
+        } else {
+            bindOut = ArrayUtils.EMPTY_STRING_ARRAY;
+        }
+
+        if (usingMultipleResultFetch) {
+            Map<String, Object> result = new HashMap<>();
+            Map<String, Object> multipleResult = this.multipleResultFetch(oriSql, stat, retVal);
+            for (String argName : bindOut) {
+                if (multipleResult.containsKey(argName)) {
+                    result.put(argName, multipleResult.get(argName));
+                } else if (ctx.containsKey(argName)) {
+                    result.put(argName, ctx.get(argName));
+                } else {
+                    result.put(argName, null);
+                }
+            }
+            return result;
+        } else {
+
+            if (def.getConfig() instanceof DmlConfig) {
+                int updateCount = stat.getUpdateCount();
+                if (def.getConfig() instanceof InsertConfig) {
+                    InsertConfig insertConfig = (InsertConfig) def.getConfig();
+                    if (insertConfig.isUseGeneratedKeys() && insertConfig.getKeyProperty() != null && !insertConfig.getKeyProperty().isEmpty()) {
+                        this.fillGeneratedKeys(stat, insertConfig, ctx);
+                    }
+                }
+                return updateCount;
+            }
+
+            if (retVal) {
+                try (ResultSet rs = stat.getResultSet()) {
+                    if (rs.isLast()) {
+                        return Collections.emptyList();
+                    }
+
+                    if (def.getResultExtractor() != null) {
+                        return def.getResultExtractor().extractData(rs);
+                    } else if (def.getResultRowCallback() != null) {
+                        new RowCallbackHandlerResultSetExtractor(def.getResultRowCallback()).extractData(rs);
+                        boolean isSingle = !def.isUsingCollection();
+                        return isSingle ? null : pageOrNot(Collections.emptyList(), oriPageInfo, newPageCnt, pageResult);
+                    } else if (def.getResultRowMapper() != null) {
+                        boolean isSingle = !def.isUsingCollection();
+                        List<?> objects = new RowMapperResultSetExtractor<>(def.getResultRowMapper(), (isSingle ? 1 : 0)).extractData(rs);
+                        return isSingle ? (objects.isEmpty() ? null : objects.get(0)) : pageOrNot(objects, oriPageInfo, newPageCnt, pageResult);
+                    } else if (def.getResultTypeHandler() != null) {
+                        boolean isSingle = !def.isUsingCollection();
+                        TypeHandlerColumnRowMapper<?> rowMapper = new TypeHandlerColumnRowMapper<>(def.getResultTypeHandler());
+                        List<?> objects = new RowMapperResultSetExtractor<>(rowMapper, (isSingle ? 1 : 0)).extractData(rs);
+                        return isSingle ? (objects.isEmpty() ? null : objects.get(0)) : pageOrNot(objects, oriPageInfo, newPageCnt, pageResult);
+                    } else if (def.getResultTypeHandlerType() != null) {
+                        boolean isSingle = !def.isUsingCollection();
+                        ResolvableType resolvableType = ResolvableType.forType(def.getResultType());
+                        TypeHandler<?> typeHandler = this.registry.getMappingRegistry().getTypeRegistry().createTypeHandler(def.getResultTypeHandlerType(), resolvableType);
+                        TypeHandlerColumnRowMapper<?> rowMapper = new TypeHandlerColumnRowMapper<>(typeHandler);
+                        List<?> objects = new RowMapperResultSetExtractor<>(rowMapper, (isSingle ? 1 : 0)).extractData(rs);
+                        return isSingle ? (objects.isEmpty() ? null : objects.get(0)) : pageOrNot(objects, oriPageInfo, newPageCnt, pageResult);
+                    } else if (def.getResultType() != null) {
+                        boolean isSingle = !def.isUsingCollection();
+                        List<?> objects = new BeanMappingResultSetExtractor<>(def.getResultType(), this.registry.getMappingRegistry(), (isSingle ? 1 : 0)).extractData(rs);
+                        return isSingle ? (objects.isEmpty() ? null : objects.get(0)) : pageOrNot(objects, oriPageInfo, newPageCnt, pageResult);
+                    } else {
+                        boolean isSingle = !def.isUsingCollection();
+                        TypeHandlerRegistry typeRegistry = this.registry.getMappingRegistry().getTypeRegistry();
+                        boolean caseInsensitive = MappingHelper.caseInsensitive(this.registry.getMappingRegistry().getGlobalOptions());
+                        List<?> objects = new ColumnMapResultSetExtractor((isSingle ? 1 : 0), typeRegistry, caseInsensitive).extractData(rs);
+                        return isSingle ? (objects.isEmpty() ? null : objects.get(0)) : pageOrNot(objects, oriPageInfo, newPageCnt, pageResult);
+                    }
+                }
+            } else {
+                return stat.getUpdateCount();
+            }
+        }
+    }
+
+    protected Object pageOrNot(List<?> objects, Page oriPageInfo, long newPageCnt, boolean pageResult) {
+        if (pageResult) {
+            PageResult<?> page = new PageResult<>(oriPageInfo, objects);
+            page.setTotalCount(newPageCnt);
+            return page;
+        } else {
+            return objects;
+        }
+    }
+
+    /** fetch generated keys from statement and backfill into parameter context (MergedMap → BeanMap → original bean) */
+    private void fillGeneratedKeys(Statement stat, InsertConfig insertConfig, Map<String, Object> ctx) throws SQLException {
+        String keyProperty = insertConfig.getKeyProperty();
+        String keyColumn = insertConfig.getKeyColumn();
+        String[] properties = keyProperty.split(",");
+
+        try (ResultSet rs = stat.getGeneratedKeys()) {
+            if (rs != null && rs.next()) {
+                if (StringUtils.isNotBlank(keyColumn)) {
+                    String[] columns = keyColumn.split(",");
+                    for (int i = 0; i < properties.length && i < columns.length; i++) {
+                        Object value = rs.getObject(columns[i].trim());
+                        ctx.put(properties[i].trim(), value);
+                    }
+                } else {
+                    for (int i = 0; i < properties.length; i++) {
+                        Object value = rs.getObject(i + 1);
+                        ctx.put(properties[i].trim(), value);
+                    }
+                }
+            }
+        }
+    }
+
+    protected abstract Map<String, Object> multipleResultFetch(SqlBuilder buildSql, Statement stat, boolean retVal) throws SQLException;
+}

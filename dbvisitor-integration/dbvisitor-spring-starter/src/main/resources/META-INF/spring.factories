@@ -1,2 +1,2 @@
 # Auto Configure
-org.springframework.boot.autoconfigure.EnableAutoConfiguration=net.hasor.dbvisitor.spring.boot.DbVisitorAutoConfiguration
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=io.github.ooknight.universe.dbvisitor.spring.boot.DbVisitorAutoConfiguration

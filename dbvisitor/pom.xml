@@ -4,7 +4,7 @@
     <parent>
         <groupId>io.github.ooknight</groupId>
         <artifactId>universe-dbvisitor-parent</artifactId>
-        <version>6.7.0</version>
+        <version>6.7.0.1</version>
     </parent>
 
     <artifactId>universe-dbvisitor</artifactId>
@@ -170,11 +170,11 @@
                             <relocations>
                                 <relocation>
                                     <pattern>ognl</pattern>
-                                    <shadedPattern>net.hasor.dbvisitor.internal.jars.ognl</shadedPattern>
+                                    <shadedPattern>io.github.ooknight.universe.dbvisitor.internal.jars.ognl</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>javassist</pattern>
-                                    <shadedPattern>net.hasor.dbvisitor.internal.jars.javassist</shadedPattern>
+                                    <shadedPattern>io.github.ooknight.universe.dbvisitor.internal.jars.javassist</shadedPattern>
                                 </relocation>
                             </relocations>
                             <filters>

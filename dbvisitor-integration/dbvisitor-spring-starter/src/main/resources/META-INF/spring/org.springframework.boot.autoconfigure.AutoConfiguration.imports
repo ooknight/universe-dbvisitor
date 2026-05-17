@@ -1,1 +1,1 @@
-net.hasor.dbvisitor.spring.boot.DbVisitorAutoConfiguration
+io.github.ooknight.universe.dbvisitor.spring.boot.DbVisitorAutoConfiguration

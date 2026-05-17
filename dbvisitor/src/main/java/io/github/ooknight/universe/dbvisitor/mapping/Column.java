@@ -1,0 +1,119 @@
+/*
+ * Copyright 2015-2022 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.ooknight.universe.dbvisitor.mapping;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.sql.Types;
+
+import io.github.ooknight.universe.dbvisitor.lambda.LambdaTemplate;
+import io.github.ooknight.universe.dbvisitor.types.TypeHandler;
+import io.github.ooknight.universe.dbvisitor.types.handler.UnknownTypeHandler;
+
+/**
+ * （可选）标记在字段或者 get/set 方法上表示映射到的列
+ *
+ * @author 赵永春 (zyc@hasor.net)
+ * @version 2020-10-31
+ */
+@Target({ElementType.FIELD, ElementType.METHOD})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Column {
+
+    /**
+     * 列名，为空的话表示采用字段名为列名 see: {@link #name()}
+     */
+    String value() default "";
+
+    /**
+     * 列名，为空的话表示采用类名为表名 see: {@link #value()}
+     */
+    String name() default "";
+
+    /**
+     * 指定使用的 jdbcType
+     */
+    int jdbcType() default Types.JAVA_OBJECT;
+
+    /**
+     * 如果当前属性是一个抽象类型，那么可以通过 specialJavaType 来指定具体的实现类
+     */
+    Class<?> specialJavaType() default Object.class;
+
+    /**
+     * 指定使用的 typeHandler
+     */
+    Class<? extends TypeHandler<?>> handler() default UnknownTypeHandler.class;
+
+    /**
+     * (选填) key 生成策略，当列的属性为 null 的时。采用一种生成算法来生成 key 值。通常做用于 自增。
+     */
+    KeyType keyType() default KeyType.None;
+
+    /**
+     * (选填) 是否为主键
+     */
+    boolean primary() default false;
+
+    /**
+     * (选填) 参与更新（在配置了 @Table 注解时，通过 {@link LambdaTemplate} 接口操作才有效）
+     */
+    boolean updatable() default true;
+
+    /**
+     * (选填) 参与新增（在配置了 @Table 注解时，通过 {@link LambdaTemplate} 接口操作才有效）
+     */
+    boolean insertable() default true;
+
+    /**
+     * (选填) 用作 select 语句时 column name 的写法，默认是空。
+     * 请注意：由于语句模版会直接参与 SQL 语句生成，因此在使用语句模版时请评估注入风险，或更换其它方案。例如：JdbcTemplate
+     */
+    String select() default "";
+
+    /**
+     * (选填) 用作 insert 语句时 value 的参数写法，默认是 ?
+     * 请注意：由于语句模版会直接参与 SQL 语句生成，因此在使用语句模版时请评估注入风险，或更换其它方案。例如：JdbcTemplate
+     */
+    String insert() default "";
+
+    /**
+     * (选填) 用作 update set 语句时 value 的参数写法，默认是 ?
+     * 请注意：由于语句模版会直接参与 SQL 语句生成，因此在使用语句模版时请评估注入风险，或更换其它方案。例如：JdbcTemplate
+     */
+    String update() default "";
+
+    /**
+     * (选填) 用作 update/delete 的 where 语句时 column name 的写法，默认是空
+     * 请注意：请注意：由于语句模版会直接参与 SQL 语句生成，因此在使用语句模版时请评估注入风险，或更换其它方案。例如：JdbcTemplate
+     */
+    String whereColumn() default "";
+
+    /**
+     * (选填) 用作 update/delete 的 where 语句时 value 的参数写法，默认是 ?
+     * 请注意：请注意：由于语句模版会直接参与 SQL 语句生成，因此在使用语句模版时请评估注入风险，或更换其它方案。例如：JdbcTemplate
+     */
+    String whereValue() default "";
+
+    /**
+     * (选填) 用作 order by 时 column name 的写法，默认是空
+     * 请注意：请注意：由于语句模版会直接参与 SQL 语句生成，因此在使用语句模版时请评估注入风险，或更换其它方案。例如：JdbcTemplate
+     */
+    String orderColumn() default "";
+
+}
